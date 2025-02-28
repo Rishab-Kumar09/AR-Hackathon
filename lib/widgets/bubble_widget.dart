@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import '../models/game_model.dart';
+import 'dart:math' as math;
 
 class BubbleWidget extends StatelessWidget {
   final Bubble bubble;
@@ -23,101 +24,99 @@ class BubbleWidget extends StatelessWidget {
     final baseSize = bubble.size * screenSize.width;
     final size = baseSize;
 
-    // If bubble is popped or too small, don't render
-    if (size < 5 || bubble.isPopped) {
+    // If bubble is too small, don't render
+    if (size < 5) {
       return const SizedBox.shrink();
     }
 
+    // If bubble is popped, use its scale and opacity properties
+    final displaySize = bubble.isPopped ? size * bubble.scale : size;
+    // Ensure opacity is between 0.0 and 1.0
+    final displayOpacity =
+        bubble.isPopped ? math.max(0.0, math.min(1.0, bubble.opacity)) : 1.0;
+
     return Positioned(
-      left: x - size / 2,
-      top: y - size / 2,
-      child: _buildBubble(size),
+      left: x - displaySize / 2,
+      top: y - displaySize / 2,
+      child: _buildBubble(size, displaySize, displayOpacity),
     );
   }
 
-  Widget _buildBubble(double size) {
+  Widget _buildBubble(double size, double displaySize, double opacity) {
     // If bubble is popped, show pop animation
     if (bubble.isPopped) {
-      return _buildPoppedBubble(size);
+      return _buildPoppedBubble(size, displaySize, opacity);
     }
 
-    // Regular bubble
+    // Simplified bubble with minimal effects
     return Container(
-      width: size,
-      height: size,
+      width: displaySize,
+      height: displaySize,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
-        color: bubble.color.withOpacity(0.7),
+        color: bubble.color.withOpacity(clampOpacity(0.7 * opacity)),
         gradient: RadialGradient(
           colors: [
-            bubble.color.withOpacity(0.5),
-            bubble.color.withOpacity(0.3),
+            Colors.white.withOpacity(clampOpacity(0.8 * opacity)),
+            bubble.color.withOpacity(clampOpacity(0.7 * opacity)),
           ],
-          stops: const [0.2, 1.0],
+          stops: const [0.0, 1.0],
+          center: const Alignment(0.3, -0.3),
         ),
-        boxShadow: [
-          BoxShadow(
-            color: bubble.color.withOpacity(0.3),
-            blurRadius: 10,
-            spreadRadius: 2,
-          ),
-        ],
+        // Removed box shadow for better performance
       ),
-      child: Stack(
-        children: [
-          // Bubble shine effect
-          Positioned(
-            top: size * 0.2,
-            left: size * 0.2,
-            child: Container(
-              width: size * 0.3,
-              height: size * 0.3,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: Colors.white.withOpacity(0.4),
-              ),
-            ),
+      child: Center(
+        // Simplified content - just the points text
+        child: Text(
+          '${bubble.points}',
+          style: TextStyle(
+            color: Colors.white,
+            fontWeight: FontWeight.bold,
+            fontSize: displaySize * 0.3,
+            // Removed text shadows for better performance
           ),
-
-          // Bubble points
-          Center(
-            child: Text(
-              '${bubble.points}',
-              style: TextStyle(
-                color: Colors.white,
-                fontWeight: FontWeight.bold,
-                fontSize: size * 0.3,
-              ),
-            ),
-          ),
-        ],
+        ),
       ),
-    ).animate().fadeIn(duration: 300.ms);
+    )
+        .animate(onPlay: (controller) => controller.repeat(reverse: true))
+        .moveY(
+          begin: -1, // Reduced movement amount
+          end: 1,
+          duration: 1500.ms,
+          curve: Curves.easeInOut,
+        )
+        .animate()
+        .fadeIn(duration: 300.ms, curve: Curves.easeOut);
   }
 
-  Widget _buildPoppedBubble(double size) {
+  Widget _buildPoppedBubble(double size, double displaySize, double opacity) {
+    // Simplified pop effect
     return Container(
-      width: size * 1.5,
-      height: size * 1.5,
+      width: displaySize,
+      height: displaySize,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
         color: Colors.transparent,
         border: Border.all(
-          color: bubble.color.withOpacity(0.5),
+          color: bubble.color.withOpacity(clampOpacity(opacity * 0.7)),
           width: 2,
         ),
       ),
-    )
-        .animate()
-        .scale(
-          duration: 300.ms,
-          curve: Curves.easeOut,
-          begin: const Offset(0.8, 0.8),
-          end: const Offset(1.5, 1.5),
-        )
-        .fadeOut(
-          duration: 300.ms,
-          curve: Curves.easeOut,
-        );
+      child: Center(
+        child: Container(
+          width: displaySize * 0.4,
+          height: displaySize * 0.4,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: Colors.white.withOpacity(clampOpacity(opacity * 0.8)),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // Helper method to ensure opacity is between 0.0 and 1.0
+  double clampOpacity(double value) {
+    return math.max(0.0, math.min(1.0, value));
   }
 }

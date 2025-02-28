@@ -8,6 +8,15 @@ class CameraService {
   final ValueNotifier<List<Pose>> detectedPoses = ValueNotifier<List<Pose>>([]);
   PoseDetector? _poseDetector;
   bool _isProcessing = false;
+  int _frameSkipCount = 0;
+  final int _frameSkipTarget =
+      2; // Skip every 2 frames to reduce buffer pressure
+
+  // Store the last camera image for TFLite processing
+  CameraImage? _lastCameraImage;
+
+  // Flag to track if camera is active
+  bool _isActive = false;
 
   // Initialize camera
   Future<void> initialize() async {
@@ -20,10 +29,14 @@ class CameraService {
     }
 
     try {
-      // Initialize pose detector
+      // Clean up any existing resources
+      await dispose();
+
+      // Initialize pose detector with lighter model for better performance
       _poseDetector = PoseDetector(
         options: PoseDetectorOptions(
-          model: PoseDetectionModel.base,
+          model:
+              PoseDetectionModel.base, // Use base model for better performance
           mode: PoseDetectionMode.stream,
         ),
       );
@@ -44,10 +57,15 @@ class CameraService {
         orElse: () => cameras.first,
       );
 
-      // Initialize camera controller
+      if (kDebugMode) {
+        print(
+            'Using camera: ${frontCamera.name} with orientation: ${frontCamera.sensorOrientation}');
+      }
+
+      // Initialize camera controller with medium resolution for better balance
       _cameraController = CameraController(
         frontCamera,
-        ResolutionPreset.medium,
+        ResolutionPreset.medium, // Medium resolution for better tracking
         enableAudio: false,
         imageFormatGroup: ImageFormatGroup.yuv420,
       );
@@ -55,7 +73,9 @@ class CameraService {
       // Initialize camera
       await _cameraController!.initialize();
 
-      // Start image stream
+      _isActive = true;
+
+      // Start image stream with frame skipping to reduce buffer pressure
       await _cameraController!.startImageStream(_processCameraImage);
 
       if (kDebugMode) {
@@ -65,31 +85,44 @@ class CameraService {
       if (kDebugMode) {
         print('Error initializing camera: $e');
       }
-      rethrow;
+      // Don't rethrow - just log the error and continue
     }
   }
 
-  // Process camera image
+  // Process camera image for pose detection
   Future<void> _processCameraImage(CameraImage image) async {
-    // Skip if already processing or pose detector is null
-    if (_isProcessing || _poseDetector == null) return;
+    // Skip if already processing an image or camera is not active
+    if (_isProcessing || !_isActive) return;
+
+    // Implement frame skipping to reduce buffer pressure
+    if (_frameSkipCount < _frameSkipTarget) {
+      _frameSkipCount++;
+      return;
+    }
+    _frameSkipCount = 0;
 
     _isProcessing = true;
+    _lastCameraImage = image;
 
     try {
-      // Convert camera image to InputImage
+      // Convert CameraImage to InputImage
       final inputImage = _convertCameraImageToInputImage(image);
+      if (inputImage == null) {
+        _isProcessing = false;
+        return;
+      }
 
-      if (inputImage != null) {
-        // Process image with pose detector
-        final poses = await _poseDetector!.processImage(inputImage);
+      // Process the image with ML Kit
+      final poses = await _poseDetector!.processImage(inputImage);
 
-        // Update detected poses
+      // Only update if still active
+      if (_isActive) {
+        // Update the detected poses
         detectedPoses.value = poses;
       }
     } catch (e) {
       if (kDebugMode) {
-        print('Error processing camera image: $e');
+        print('Error processing image: $e');
       }
     } finally {
       _isProcessing = false;
@@ -143,14 +176,56 @@ class CameraService {
   }
 
   // Dispose resources
-  void dispose() {
-    if (!kIsWeb) {
-      _cameraController?.stopImageStream();
-      _cameraController?.dispose();
-      _poseDetector?.close();
+  Future<void> dispose() async {
+    _isActive = false;
+
+    // Stop image stream first to prevent buffer queue issues
+    if (_cameraController?.value.isStreamingImages ?? false) {
+      try {
+        await _cameraController?.stopImageStream();
+      } catch (e) {
+        if (kDebugMode) {
+          print('Error stopping image stream: $e');
+        }
+      }
+    }
+
+    // Dispose camera controller
+    if (_cameraController != null) {
+      try {
+        await _cameraController?.dispose();
+        _cameraController = null;
+      } catch (e) {
+        if (kDebugMode) {
+          print('Error disposing camera controller: $e');
+        }
+      }
+    }
+
+    // Close pose detector
+    try {
+      await _poseDetector?.close();
+      _poseDetector = null;
+    } catch (e) {
+      if (kDebugMode) {
+        print('Error closing pose detector: $e');
+      }
+    }
+
+    // Clear last camera image
+    _lastCameraImage = null;
+
+    if (kDebugMode) {
+      print('Camera resources disposed');
     }
   }
 
   // Get camera controller
   CameraController? get cameraController => _cameraController;
+
+  // Get last camera image
+  CameraImage? get lastCameraImage => _lastCameraImage;
+
+  // Check if camera is active
+  bool get isActive => _isActive;
 }

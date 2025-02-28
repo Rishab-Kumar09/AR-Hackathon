@@ -1,10 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 import 'screens/home_screen.dart';
 import 'models/game_model.dart';
 
-void main() {
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Initialize wakelock to keep screen awake during gameplay
+  await WakelockPlus.enable();
+
   runApp(const MyApp());
 }
 

@@ -1,10 +1,43 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_animate/flutter_animate.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 import 'game_screen.dart';
 
-class HomeScreen extends StatelessWidget {
+class HomeScreen extends StatefulWidget {
   const HomeScreen({Key? key}) : super(key: key);
+
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+
+    // Ensure wakelock is enabled when home screen is shown
+    WakelockPlus.enable();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      // Re-enable wakelock when app is resumed
+      WakelockPlus.enable();
+    } else if (state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.paused) {
+      // Disable wakelock when app is inactive or paused
+      WakelockPlus.disable();
+    }
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -64,7 +97,52 @@ class HomeScreen extends StatelessWidget {
                   ),
                 ).animate().fadeIn(delay: 300.ms, duration: 800.ms),
 
-                const SizedBox(height: 60),
+                const SizedBox(height: 20),
+
+                // Optimal distance information
+                if (!kIsWeb)
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 40),
+                    margin: const EdgeInsets.symmetric(vertical: 10),
+                    decoration: BoxDecoration(
+                      color: Colors.blue.shade800.withOpacity(0.3),
+                      borderRadius: BorderRadius.circular(15),
+                      border: Border.all(color: Colors.blue.shade400, width: 1),
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.all(12.0),
+                      child: Column(
+                        children: [
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(Icons.info_outline, color: Colors.white),
+                              const SizedBox(width: 8),
+                              Text(
+                                'Optimal Playing Distance',
+                                style: TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.bold,
+                                  color: Colors.white,
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            'For best hand tracking results, position yourself 1.5-2 feet (45-60 cm) from your camera in a well-lit area.',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              fontSize: 14,
+                              color: Colors.white.withOpacity(0.9),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ).animate().fadeIn(delay: 450.ms, duration: 800.ms),
+
+                const SizedBox(height: 20),
 
                 // Animated bubbles
                 _buildAnimatedBubbles(),

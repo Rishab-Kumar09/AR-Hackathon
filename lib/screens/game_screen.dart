@@ -2,11 +2,13 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'package:flutter/foundation.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 import '../models/game_model.dart';
 import '../services/camera_service.dart';
 import '../services/hand_tracking_service.dart';
 import '../widgets/camera_preview_widget.dart';
 import '../widgets/bubble_widget.dart';
+import 'dart:async';
 
 class GameScreen extends StatefulWidget {
   const GameScreen({Key? key}) : super(key: key);
@@ -21,15 +23,29 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
   bool _isCameraInitialized = false;
   bool _isWebPlatform = false;
 
+  // Performance optimization variables
+  DateTime _lastFrameTime = DateTime.now();
+  final ValueNotifier<double> _fps = ValueNotifier<double>(0);
+  final ValueNotifier<Offset> _handPositionForUI =
+      ValueNotifier<Offset>(Offset.zero);
+
+  // Reduce UI update frequency
+  int _uiUpdateCounter = 0;
+  final int _uiUpdateInterval =
+      1; // Update UI every frame for better responsiveness
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
 
+    // Enable wakelock to prevent screen from sleeping
+    WakelockPlus.enable();
+
     // Check if running on web platform
     _isWebPlatform = kIsWeb;
 
-    // Initialize hand tracking service
+    // Initialize hand tracking services
     _handTrackingService = HandTrackingService();
 
     if (!_isWebPlatform) {
@@ -40,6 +56,27 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
         _isCameraInitialized = true; // Skip camera initialization
       });
     }
+
+    // Start FPS counter with reduced frequency
+    _startFpsCounter();
+  }
+
+  // Start FPS counter
+  void _startFpsCounter() {
+    // Update FPS every 2 seconds instead of every second
+    Timer.periodic(const Duration(seconds: 2), (timer) {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+
+      // Calculate FPS based on time since last frame
+      final now = DateTime.now();
+      final elapsed = now.difference(_lastFrameTime).inMilliseconds;
+      if (elapsed > 0) {
+        _fps.value = 1000 / elapsed;
+      }
+    });
   }
 
   Future<void> _initializeCamera() async {
@@ -56,11 +93,19 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
 
       // Listen to pose updates and track hands
       _cameraService.detectedPoses.addListener(() {
+        if (!mounted) return;
+
         final poses = _cameraService.detectedPoses.value;
-        if (mounted) {
-          final screenSize = MediaQuery.of(context).size;
-          _handTrackingService.processPoses(poses, screenSize);
-        }
+        final screenSize = MediaQuery.of(context).size;
+
+        // Update last frame time for FPS calculation
+        _lastFrameTime = DateTime.now();
+
+        // Use ML Kit pose detection
+        _handTrackingService.processPoses(poses, screenSize);
+
+        // Update UI more frequently for better responsiveness
+        _handPositionForUI.value = _handTrackingService.handPosition.value;
       });
     } catch (e) {
       // Handle camera initialization error
@@ -76,28 +121,54 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
 
     // Listen to hand position updates and check for bubble pops
     _handTrackingService.handPosition.addListener(() {
-      if (mounted) {
-        final gameModel = Provider.of<GameModel>(context, listen: false);
-        final handPosition = _handTrackingService.handPosition.value;
-        gameModel.checkBubblePops(handPosition.dx, handPosition.dy);
-      }
+      if (!mounted) return;
+
+      final gameModel = Provider.of<GameModel>(context, listen: false);
+      final handPosition = _handTrackingService.handPosition.value;
+
+      // Check for bubble pops on every frame
+      gameModel.checkBubblePops(handPosition.dx, handPosition.dy);
     });
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     // Handle app lifecycle changes
-    if (state == AppLifecycleState.inactive && mounted) {
+    if ((state == AppLifecycleState.inactive ||
+            state == AppLifecycleState.paused) &&
+        mounted) {
+      // Stop game and release camera resources when app is inactive or paused
       Provider.of<GameModel>(context, listen: false).stopGame();
+
+      // Release camera resources to prevent buffer queue issues
+      if (!_isWebPlatform && _isCameraInitialized) {
+        _cameraService.dispose();
+      }
+
+      // Disable wakelock when app is inactive
+      WakelockPlus.disable();
+    } else if (state == AppLifecycleState.resumed && mounted) {
+      // Re-initialize camera when app is resumed
+      if (!_isWebPlatform) {
+        _initializeCamera();
+      }
+
+      // Re-enable wakelock when app is resumed
+      WakelockPlus.enable();
     }
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+
+    // Properly dispose camera resources
     if (!_isWebPlatform && _isCameraInitialized) {
       _cameraService.dispose();
     }
+
+    // Disable wakelock when screen is disposed
+    WakelockPlus.disable();
     super.dispose();
   }
 
@@ -123,10 +194,7 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
         final screenSize = MediaQuery.of(context).size;
         final normalizedX = event.position.dx / screenSize.width;
         final normalizedY = event.position.dy / screenSize.height;
-        _handTrackingService.handPosition.value =
-            Offset(normalizedX, normalizedY);
-        _handTrackingService.debugInfo.value =
-            "Mouse: (${normalizedX.toStringAsFixed(2)}, ${normalizedY.toStringAsFixed(2)})";
+        _handTrackingService.setHandPosition(normalizedX, normalizedY);
       },
       child: GestureDetector(
         onTapDown: (details) {
@@ -134,8 +202,7 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
           final screenSize = MediaQuery.of(context).size;
           final normalizedX = details.globalPosition.dx / screenSize.width;
           final normalizedY = details.globalPosition.dy / screenSize.height;
-          _handTrackingService.handPosition.value =
-              Offset(normalizedX, normalizedY);
+          _handTrackingService.setHandPosition(normalizedX, normalizedY);
 
           // Simulate a "pop" action
           final gameModel = Provider.of<GameModel>(context, listen: false);
@@ -168,10 +235,10 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
                   )
                 : CameraPreviewWidget(
                     cameraService: _cameraService,
-                    showPoseDetection: true,
+                    showPoseDetection: false,
                   ),
 
-            // Game UI overlay
+            // Game UI overlay - simplified
             Stack(
               fit: StackFit.expand,
               children: [
@@ -183,14 +250,24 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
                 // Bubbles
                 ..._buildBubbles(gameModel),
 
-                // Hand position indicator
+                // Hand position indicator - optimized for responsiveness
                 ValueListenableBuilder<Offset>(
-                  valueListenable: _handTrackingService.handPosition,
+                  valueListenable: _handPositionForUI,
                   builder: (context, handPosition, _) {
                     // Convert normalized coordinates to screen coordinates
                     final screenSize = MediaQuery.of(context).size;
                     final x = handPosition.dx * screenSize.width;
                     final y = handPosition.dy * screenSize.height;
+
+                    // Skip rendering if position is invalid
+                    if (x.isNaN ||
+                        y.isNaN ||
+                        x < -100 ||
+                        y < -100 ||
+                        x > screenSize.width + 100 ||
+                        y > screenSize.height + 100) {
+                      return const SizedBox.shrink();
+                    }
 
                     return Positioned(
                       left: x - 15,
@@ -199,7 +276,7 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
                         width: 30,
                         height: 30,
                         decoration: BoxDecoration(
-                          color: Colors.blue.withOpacity(0.5),
+                          color: Colors.blue.withOpacity(0.3),
                           shape: BoxShape.circle,
                           border: Border.all(
                             color: Colors.white,
@@ -211,32 +288,97 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
                   },
                 ),
 
-                // Debug info overlay
-                Positioned(
-                  top: 100,
-                  left: 20,
-                  right: 20,
-                  child: ValueListenableBuilder<String>(
-                    valueListenable: _handTrackingService.debugInfo,
-                    builder: (context, debugText, _) {
-                      return Container(
-                        padding: const EdgeInsets.all(8),
-                        color: Colors.black.withOpacity(0.5),
-                        child: Text(
-                          _isWebPlatform
-                              ? "Web Mode: Use mouse to pop bubbles\n$debugText"
-                              : debugText,
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 12,
+                // FPS counter (for debugging)
+                if (kDebugMode)
+                  Positioned(
+                    top: 80,
+                    left: 20,
+                    child: ValueListenableBuilder<double>(
+                      valueListenable: _fps,
+                      builder: (context, fps, _) {
+                        return Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 4,
                           ),
-                        ),
-                      );
-                    },
+                          decoration: BoxDecoration(
+                            color: Colors.black.withOpacity(0.5),
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Text(
+                            'FPS: ${fps.toStringAsFixed(1)}',
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 12,
+                            ),
+                          ),
+                        );
+                      },
+                    ),
                   ),
-                ),
 
-                // Game info overlay
+                // Hand tracking debug info
+                if (!kIsWeb && gameModel.isPlaying)
+                  Positioned(
+                    top: 120,
+                    left: 20,
+                    child: ValueListenableBuilder<String>(
+                      valueListenable: _handTrackingService.debugInfo,
+                      builder: (context, debugInfo, _) {
+                        // Determine if tracking is poor based on debug info
+                        bool isPoorTracking = debugInfo.contains('Invalid') ||
+                            debugInfo.contains('No hand') ||
+                            debugInfo.contains('No poses');
+
+                        return Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 4,
+                          ),
+                          decoration: BoxDecoration(
+                            color: isPoorTracking
+                                ? Colors.red.withOpacity(0.7)
+                                : Colors.black.withOpacity(0.5),
+                            borderRadius: BorderRadius.circular(10),
+                            border: isPoorTracking
+                                ? Border.all(color: Colors.yellow, width: 1)
+                                : null,
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'Hand Tracking: ${isPoorTracking ? "Poor" : "Good"}',
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                              if (isPoorTracking)
+                                const Text(
+                                  'Try adjusting your distance (1.5-2 feet)',
+                                  style: TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 10,
+                                  ),
+                                ),
+                              // Add debug info for bubbles
+                              Text(
+                                'Bubbles: ${gameModel.bubbles.length}',
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 10,
+                                ),
+                              ),
+                            ],
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+
+                // Game info overlay - simplified
                 Positioned(
                   top: 40,
                   left: 20,
@@ -251,92 +393,39 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
                           vertical: 8,
                         ),
                         decoration: BoxDecoration(
-                          color: Colors.black54,
+                          color: Colors.black.withOpacity(0.5),
                           borderRadius: BorderRadius.circular(20),
                         ),
                         child: Text(
                           'Score: ${gameModel.score}',
                           style: const TextStyle(
                             color: Colors.white,
-                            fontSize: 18,
+                            fontSize: 16,
                             fontWeight: FontWeight.bold,
                           ),
                         ),
                       ),
 
-                      // Level
+                      // Time remaining
                       Container(
                         padding: const EdgeInsets.symmetric(
                           horizontal: 16,
                           vertical: 8,
                         ),
                         decoration: BoxDecoration(
-                          color: Colors.purple.withOpacity(0.7),
+                          color: Colors.black.withOpacity(0.5),
                           borderRadius: BorderRadius.circular(20),
                         ),
                         child: Text(
-                          'Level: ${gameModel.level}',
+                          'Time: ${gameModel.timeRemaining}s',
                           style: const TextStyle(
                             color: Colors.white,
-                            fontSize: 18,
+                            fontSize: 16,
                             fontWeight: FontWeight.bold,
                           ),
                         ),
                       ),
-
-                      // Time
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 16,
-                          vertical: 8,
-                        ),
-                        decoration: BoxDecoration(
-                          color: gameModel.timeRemaining < 10
-                              ? Colors.red.withOpacity(0.7)
-                              : Colors.black54,
-                          borderRadius: BorderRadius.circular(20),
-                        ),
-                        child: Row(
-                          children: [
-                            const Icon(
-                              Icons.timer,
-                              color: Colors.white,
-                              size: 18,
-                            ),
-                            const SizedBox(width: 4),
-                            Text(
-                              '${gameModel.timeRemaining}s',
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 18,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
                     ],
-                  ),
-                ),
-
-                // Lives
-                Positioned(
-                  top: 90,
-                  right: 20,
-                  child: Row(
-                    children: List.generate(
-                      3,
-                      (index) => Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 4),
-                        child: Icon(
-                          Icons.favorite,
-                          color: index < gameModel.lives
-                              ? Colors.red
-                              : Colors.grey,
-                          size: 24,
-                        ),
-                      ),
-                    ),
                   ),
                 ),
 
@@ -345,37 +434,75 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
                   bottom: 20,
                   left: 0,
                   right: 0,
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
+                  child: Column(
                     children: [
-                      ElevatedButton(
-                        onPressed: gameModel.isPlaying
-                            ? gameModel.stopGame
-                            : gameModel.startGame,
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor:
-                              gameModel.isPlaying ? Colors.red : Colors.blue,
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 24,
-                            vertical: 12,
-                          ),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(30),
+                      // Optimal distance reminder - only show when not on web and when hand tracking is active
+                      if (!kIsWeb && gameModel.isPlaying)
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 15),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 16,
+                              vertical: 8,
+                            ),
+                            decoration: BoxDecoration(
+                              color: Colors.black.withOpacity(0.6),
+                              borderRadius: BorderRadius.circular(15),
+                              border: Border.all(
+                                  color: Colors.blue.shade400, width: 1),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(Icons.straighten,
+                                    color: Colors.white, size: 16),
+                                const SizedBox(width: 8),
+                                Text(
+                                  'Optimal distance: 1.5-2 feet (45-60 cm)',
+                                  style: TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 14,
+                                  ),
+                                ),
+                              ],
+                            ),
                           ),
                         ),
-                        child: Text(
-                          gameModel.isPlaying ? 'Stop Game' : 'Start Game',
-                          style: const TextStyle(
-                            fontSize: 18,
-                            fontWeight: FontWeight.bold,
+
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          ElevatedButton(
+                            onPressed: gameModel.isPlaying
+                                ? gameModel.stopGame
+                                : gameModel.startGame,
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: gameModel.isPlaying
+                                  ? Colors.red
+                                  : Colors.blue,
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 24,
+                                vertical: 12,
+                              ),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(30),
+                              ),
+                            ),
+                            child: Text(
+                              gameModel.isPlaying ? 'Stop Game' : 'Start Game',
+                              style: const TextStyle(
+                                fontSize: 18,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
                           ),
-                        ),
+                        ],
                       ),
                     ],
                   ),
                 ),
 
-                // Game over overlay
+                // Game over overlay - simplified
                 if (!gameModel.isPlaying && gameModel.score > 0)
                   Container(
                     color: Colors.black54,
@@ -390,7 +517,7 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
                               fontSize: 36,
                               fontWeight: FontWeight.bold,
                             ),
-                          ).animate().fadeIn(duration: 500.ms),
+                          ),
                           const SizedBox(height: 20),
                           Text(
                             'Score: ${gameModel.score}',
@@ -398,16 +525,24 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
                               color: Colors.white,
                               fontSize: 24,
                             ),
-                          ).animate().fadeIn(delay: 300.ms, duration: 500.ms),
+                          ),
                           const SizedBox(height: 10),
                           Text(
                             'High Score: ${gameModel.highScore}',
                             style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 20,
+                            ),
+                          ),
+                          const SizedBox(height: 10),
+                          const Text(
+                            'Time\'s up!',
+                            style: TextStyle(
                               color: Colors.yellow,
                               fontSize: 18,
                             ),
-                          ).animate().fadeIn(delay: 600.ms, duration: 500.ms),
-                          const SizedBox(height: 40),
+                          ),
+                          const SizedBox(height: 30),
                           ElevatedButton(
                             onPressed: gameModel.startGame,
                             style: ElevatedButton.styleFrom(
@@ -427,7 +562,7 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
                                 fontWeight: FontWeight.bold,
                               ),
                             ),
-                          ).animate().fadeIn(delay: 900.ms, duration: 500.ms),
+                          ),
                         ],
                       ),
                     ),
