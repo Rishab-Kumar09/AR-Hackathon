@@ -21,6 +21,7 @@ class MyApp extends StatelessWidget {
     return ChangeNotifierProvider(
       create: (context) => GameModel(),
       child: MaterialApp(
+        debugShowCheckedModeBanner: false,
         title: 'AR Bubble Pop',
         theme: ThemeData(
           colorScheme: ColorScheme.fromSeed(
